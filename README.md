@@ -6,23 +6,19 @@ A production-ready RAG (Retrieval Augmented Generation) pipeline that lets stude
 
 ```mermaid
 flowchart TD
-    A([👤 Student]) -->|POST /query| B[FastAPI]
+    A([Student]) -->|POST /query| B[FastAPI]
     B --> C[LangGraph Orchestrator]
-
-    C --> D[🔍 Classify Question\nQwen LLM]
-
-    D -->|academic| E[📚 Retrieve Context\nChromaDB Vector Search]
-    D -->|off_topic| F[🚫 Reject\nOff-topic message]
-
-    E --> G[💬 Generate Answer\nCloud: Qwen3-235B\nLocal: Llama3 via Ollama]
-
-    G --> H([✅ Answer + Sources])
-    F --> I([❌ Sorry, off-topic])
+    C --> D[Classify Question - Qwen LLM]
+    D -->|academic| E[Retrieve Context - ChromaDB]
+    D -->|off_topic| F[Reject - Off-topic message]
+    E --> G[Generate Answer - Cloud or Local LLM]
+    G --> H([Answer + Sources])
+    F --> I([Sorry, off-topic])
 
     subgraph Ingestion Pipeline
-        J[📄 PDF Files] --> K[Extract Text\npypdf]
-        K --> L[Chunk Text\nRecursiveCharacterTextSplitter]
-        L --> M[Embed\nBAAI/bge-en-icl]
+        J[PDF Files] --> K[Extract Text - pypdf]
+        K --> L[Chunk Text]
+        L --> M[Embed - BAAI/bge-en-icl]
         M --> N[(ChromaDB)]
     end
 
