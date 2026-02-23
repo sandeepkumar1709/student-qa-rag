@@ -61,6 +61,18 @@ def generate_answer(query, context):
     )
     return response.choices[0].message.content.strip()
 
+def generate_web_answer(query, context):
+    prompt = f"Context from web search:\n{context}\n\nQuestion: {query}\nAnswer:"
+    response = llm_client.chat.completions.create(
+        model=LLM_MODEL,
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant. Answer the question using the provided web search results. Be concise and informative."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=500
+    )
+    return response.choices[0].message.content.strip()
+
 
 
 def main():

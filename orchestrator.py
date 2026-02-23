@@ -1,9 +1,13 @@
 from typing import TypedDict
 from langgraph.graph import StateGraph, END
-from query import embeddings_query, generate_answer
+from query import embeddings_query, generate_answer, generate_web_answer
 from openai import OpenAI
 from dotenv import load_dotenv
+from mcp import ClientSession, StdioServerParameters
+from mcp.client.stdio import stdio_client
+import asyncio
 import os
+import sys
 
 load_dotenv()
 
@@ -14,11 +18,12 @@ client = OpenAI(
 
 # State — the backpack passed between all nodes
 class State(TypedDict):
-    question: str      # input from student
-    category: str      # set by classify node: "academic" or "off_topic"
-    context: str       # set by retrieve node
-    sources: list      # set by retrieve node
-    answer: str        # set by generate node
+    question: str
+    category: str
+    context: str
+    sources: list
+    source_type: str   # "papers" or "web"
+    answer: str
 
 
 
@@ -39,22 +44,40 @@ def retrieve_context(state: State) -> State:
     results = embeddings_query(state['question'])
     context = "\n\n".join(results['documents'][0])
     sources = list(set([m['source'] for m in results['metadatas'][0]]))
-    return {"context": context, "sources": sources}
+    return {"context": context, "sources": sources, "source_type": "papers"}
 
 def generate_answer_node(state: State) -> State:
     answer = generate_answer(state['question'], state['context'])
     return {"answer": answer}
 
-def reject_off_topic(state: State) -> State:
-    return {"answer": "Sorry, I can only answer questions related to academic research.", "sources": []}
+def generate_web_node(state: State) -> State:
+    answer = generate_web_answer(state['question'], state['context'])
+    return {"answer": answer}
 
+def web_search_node(state: State) -> State:
+    """Call MCP server's web_search tool for off-topic questions"""
+    async def _search():
+        python_path = os.path.join(os.path.dirname(sys.executable), 'python.exe')
+        server_params = StdioServerParameters(
+            command=python_path,
+            args=["mcp_server.py"]
+        )
+        async with stdio_client(server_params) as (read, write):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                result = await session.call_tool("web_search", {"query": state["question"]})
+                return result.content[0].text
+    
+    context = asyncio.run(_search())
+    print(f"[DEBUG] Web search context:\n{len(context)} characters")
+    print(f"[DEBUG] Web search context :\n{context[:500]}")
+    return {"context": context, "sources": ["web search"], "source_type": "web"}
 
-
-
+# Route: off_topic → web_search instead of reject
 def route(state: State) -> str:
     if "academic" in state['category']:
         return "retrieve"
-    return "reject"
+    return "web_search"
 
 # Build the graph
 graph = StateGraph(State)
@@ -63,24 +86,27 @@ graph = StateGraph(State)
 graph.add_node("classify", classify_question)
 graph.add_node("retrieve", retrieve_context)
 graph.add_node("generate", generate_answer_node)
-graph.add_node("reject", reject_off_topic)
+graph.add_node("web_search", web_search_node)
+graph.add_node("generate_web", generate_web_node)
 
 # Add edges
 graph.set_entry_point("classify")
 graph.add_conditional_edges("classify", route, {
     "retrieve": "retrieve",
-    "reject": "reject"
+    "web_search": "web_search"
 })
 graph.add_edge("retrieve", "generate")
 graph.add_edge("generate", END)
-graph.add_edge("reject", END)
+graph.add_edge("web_search", "generate_web")
+graph.add_edge("generate_web", END)
 
 # Compile
 app = graph.compile()
 
 # Test it
 if __name__ == "__main__":
-    result = app.invoke({"question": "What is the best pizza place in College Park?"})
+    result = app.invoke({"question": "What does the paper discuss about retrieval augmented generation evaluation?"})
 
     print(f"Answer: {result['answer']}")
     print(f"Sources: {result.get('sources', [])}")
+    print(f"Source Type: {result.get('source_type', 'unknown')}")

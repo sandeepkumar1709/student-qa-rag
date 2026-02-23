@@ -12,9 +12,14 @@ class QueryRequest(BaseModel):
 class QueryResponse(BaseModel):
     answer: str
     sources: list[str]
+    source_type: str    # "papers" or "web"
 
 @app.post("/query", response_model=QueryResponse)
 def ask(request: QueryRequest):
     result = orchestrator_app.invoke({"question": request.question})
-    return QueryResponse(answer=result['answer'], sources=result.get('sources', []))
+    return QueryResponse(
+        answer=result['answer'],
+        sources=result.get('sources', []),
+        source_type=result.get('source_type', 'unknown')
+    )
 
