@@ -1,6 +1,6 @@
 # Student Q&A System
 
-A production-ready RAG (Retrieval Augmented Generation) pipeline that lets students query academic papers conversationally. Built with FastAPI, LangGraph, ChromaDB, and supports both cloud and local (air gap) LLM inference.
+A production-ready RAG (Retrieval Augmented Generation) pipeline that lets students query academic papers conversationally. Built with FastAPI, LangGraph, ChromaDB, and MCP (Model Context Protocol). Supports both cloud and local (air gap) LLM inference, with MCP-powered web search fallback for non-academic questions.
 
 ## Architecture
 
@@ -10,10 +10,16 @@ flowchart TD
     B --> C[LangGraph Orchestrator]
     C --> D[Classify Question - Qwen LLM]
     D -->|academic| E[Retrieve Context - ChromaDB]
-    D -->|off_topic| F[Reject - Off-topic message]
+    D -->|off_topic| F[Web Search - MCP Server]
     E --> G[Generate Answer - Cloud or Local LLM]
-    G --> H([Answer + Sources])
-    F --> I([Sorry, off-topic])
+    F --> W[Generate Web Answer - LLM]
+    G --> H([Answer + Sources - papers])
+    W --> X([Answer + Sources - web])
+
+    subgraph MCP Server
+        F -->|stdio| MS[mcp_server.py]
+        MS -->|DuckDuckGo| WEB[(Web)]
+    end
 
     subgraph Ingestion Pipeline
         J[PDF Files] --> K[Extract Text - pypdf]
@@ -29,7 +35,8 @@ flowchart TD
 
 - **PDF Ingestion** — loads academic papers, chunks text, embeds and stores in ChromaDB
 - **Semantic Search** — vector similarity search to retrieve relevant context
-- **LangGraph Orchestration** — classifies questions before answering; rejects off-topic queries
+- **LangGraph Orchestration** — classifies questions and routes to the right pipeline
+- **MCP Tool Integration** — off-topic questions fall back to web search via an MCP server (Model Context Protocol)
 - **Provider-Agnostic** — one env variable switches between cloud (Nebius) and local (Ollama) LLM
 - **Air Gap Ready** — set `USE_LOCAL=true` to run fully offline with Ollama, no internet required
 - **Dockerized** — runs as a container, deployable anywhere
@@ -40,7 +47,9 @@ flowchart TD
 | ------------- | ----------------------------- |
 | API           | FastAPI + Pydantic            |
 | Orchestration | LangGraph                     |
+| Tool Protocol | MCP (Model Context Protocol)  |
 | Vector DB     | ChromaDB                      |
+| Web Search    | DuckDuckGo (via ddgs + MCP)   |
 | Embeddings    | BAAI/bge-en-icl (Nebius)      |
 | Cloud LLM     | Qwen3-235B (Nebius AI Studio) |
 | Local LLM     | Llama3 / Gemma3 via Ollama    |
@@ -51,8 +60,9 @@ flowchart TD
 ```
 Student-QA/
 ├── main.py            # FastAPI app — POST /query endpoint
-├── orchestrator.py    # LangGraph graph — classify → retrieve → generate
-├── query.py           # Embedding search + LLM answer generation
+├── orchestrator.py    # LangGraph graph — classify → retrieve/web_search → generate
+├── query.py           # Embedding search + LLM answer generation (papers + web)
+├── mcp_server.py      # MCP server — exposes web_search tool via DuckDuckGo
 ├── ingest.py          # One-time PDF ingestion pipeline
 ├── Dockerfile         # Container definition
 ├── docker-compose.yml # Multi-container orchestration
@@ -122,14 +132,41 @@ Open `http://localhost:8000/docs` in your browser and use the Swagger UI.
 }
 ```
 
-**Response:**
+**Response (academic question — from papers):**
 
 ```json
 {
   "answer": "A RAG system consists of...",
-  "sources": ["paper1.pdf", "paper2.pdf"]
+  "sources": ["paper1.pdf", "paper2.pdf"],
+  "source_type": "papers"
 }
 ```
+
+**Response (general question — from web search via MCP):**
+
+```json
+{
+  "answer": "Virat Kohli is an Indian cricketer...",
+  "sources": ["web search"],
+  "source_type": "web"
+}
+```
+
+## MCP Integration
+
+The system uses [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) to integrate external tools with the LangGraph orchestrator.
+
+**How it works:**
+1. LangGraph classifies the question as academic or off-topic
+2. Off-topic questions trigger the `web_search_node` in LangGraph
+3. This node acts as an MCP client — it spawns `mcp_server.py` as a subprocess via stdio
+4. The MCP server exposes a `web_search` tool that queries DuckDuckGo
+5. Results are passed back to the LLM for answer generation
+
+**Why MCP instead of a direct API call?**
+- Standardized protocol — any MCP client can use the same server
+- Dynamic tool discovery — the client discovers available tools at runtime
+- Reusable — the web search MCP server can be plugged into Claude Desktop, Cursor, or any MCP-compatible client
 
 ## Cloud vs Local (Air Gap) Mode
 
