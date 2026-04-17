@@ -8,7 +8,7 @@ A production-ready RAG (Retrieval Augmented Generation) pipeline that lets stude
 flowchart TD
     A([Student]) -->|POST /query| B[FastAPI]
     B --> C[LangGraph Orchestrator]
-    C --> D[Classify Question - Qwen LLM]
+    C --> D["LLM Router\nclassify_question()\nmax_tokens=10"]
     D -->|academic| E[Retrieve Context - ChromaDB]
     D -->|off_topic| F[Web Search - MCP Server]
     E --> G[Generate Answer - Cloud or Local LLM]
@@ -24,7 +24,7 @@ flowchart TD
     subgraph Ingestion Pipeline
         J[PDF Files] --> K[Extract Text - pypdf]
         K --> L[Chunk Text]
-        L --> M[Embed - BAAI/bge-en-icl]
+        L --> M["Embed - $EMBED_MODEL"]
         M --> N[(ChromaDB)]
     end
 
@@ -35,25 +35,26 @@ flowchart TD
 
 - **PDF Ingestion** — loads academic papers, chunks text, embeds and stores in ChromaDB
 - **Semantic Search** — vector similarity search to retrieve relevant context
-- **LangGraph Orchestration** — classifies questions and routes to the right pipeline
+- **LLM-Based Routing** — classifies every question using the full cloud LLM capped at `max_tokens=10` — one-word output, fraction of the cost, full model quality
+- **LangGraph Orchestration** — explicit state machine with two pipelines: academic (ChromaDB) and off-topic (web search)
 - **MCP Tool Integration** — off-topic questions fall back to web search via an MCP server (Model Context Protocol)
-- **Provider-Agnostic** — one env variable switches between cloud (Nebius) and local (Ollama) LLM
+- **Provider-Agnostic** — uses the OpenAI-compatible API pattern; swap `LLM_BASE_URL` to use Nebius, Groq, OpenAI, or any compatible provider
 - **Air Gap Ready** — set `USE_LOCAL=true` to run fully offline with Ollama, no internet required
 - **Dockerized** — runs as a container, deployable anywhere
 
 ## Tech Stack
 
-| Layer         | Technology                    |
-| ------------- | ----------------------------- |
-| API           | FastAPI + Pydantic            |
-| Orchestration | LangGraph                     |
-| Tool Protocol | MCP (Model Context Protocol)  |
-| Vector DB     | ChromaDB                      |
-| Web Search    | DuckDuckGo (via ddgs + MCP)   |
-| Embeddings    | BAAI/bge-en-icl (Nebius)      |
-| Cloud LLM     | Qwen3-235B (Nebius AI Studio) |
-| Local LLM     | Llama3 / Gemma3 via Ollama    |
-| Deployment    | Docker + docker-compose       |
+| Layer         | Technology                                                   |
+| ------------- | ------------------------------------------------------------ |
+| API           | FastAPI + Pydantic                                           |
+| Orchestration | LangGraph                                                    |
+| Tool Protocol | MCP (Model Context Protocol)                                 |
+| Vector DB     | ChromaDB                                                     |
+| Web Search    | DuckDuckGo (via ddgs + MCP)                                  |
+| Embeddings    | Configurable via `EMBED_MODEL` (default: Qwen3-Embedding-8B) |
+| Cloud LLM     | Configurable via `CLOUD_LLM_MODEL` (default: Qwen3-235B)     |
+| Local LLM     | Configurable via `LOCAL_LLM_MODEL` (default: gemma3:4b)      |
+| Deployment    | Docker + docker-compose                                      |
 
 ## Project Structure
 
@@ -90,8 +91,11 @@ Create a `.env` file:
 ```env
 USE_LOCAL=false
 OLLAMA_BASE_URL=http://localhost:11434/v1
-NEBIUS_API_KEY=your_nebius_api_key
-NEBIUS_BASE_URL=https://api.studio.nebius.ai/v1
+LLM_API_KEY=your_api_key_here
+LLM_BASE_URL=https://api.studio.nebius.ai/v1
+EMBED_MODEL=Qwen/Qwen3-Embedding-8B
+CLOUD_LLM_MODEL=Qwen/Qwen3-235B-A22B-Instruct-2507
+LOCAL_LLM_MODEL=gemma3:4b
 ```
 
 ### 3. Ingest PDFs
@@ -142,6 +146,14 @@ Open `http://localhost:8000/docs` in your browser and use the Swagger UI.
 }
 ```
 
+**Request:**
+
+```json
+{
+  "question": "Who is virat kohli?"
+}
+```
+
 **Response (general question — from web search via MCP):**
 
 ```json
@@ -157,6 +169,7 @@ Open `http://localhost:8000/docs` in your browser and use the Swagger UI.
 The system uses [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) to integrate external tools with the LangGraph orchestrator.
 
 **How it works:**
+
 1. LangGraph classifies the question as academic or off-topic
 2. Off-topic questions trigger the `web_search_node` in LangGraph
 3. This node acts as an MCP client — it spawns `mcp_server.py` as a subprocess via stdio
@@ -164,18 +177,37 @@ The system uses [Model Context Protocol (MCP)](https://modelcontextprotocol.io/)
 5. Results are passed back to the LLM for answer generation
 
 **Why MCP instead of a direct API call?**
+
 - Standardized protocol — any MCP client can use the same server
 - Dynamic tool discovery — the client discovers available tools at runtime
 - Reusable — the web search MCP server can be plugged into Claude Desktop, Cursor, or any MCP-compatible client
 
 ## Cloud vs Local (Air Gap) Mode
 
-| Setting           | LLM                       | Use Case                  |
-| ----------------- | ------------------------- | ------------------------- |
-| `USE_LOCAL=false` | Nebius cloud (Qwen3-235B) | Fast, high quality        |
-| `USE_LOCAL=true`  | Ollama local (Llama3)     | Offline, private, air gap |
+| Setting           | LLM                        | Use Case                   |
+| ----------------- | -------------------------- | -------------------------- |
+| `USE_LOCAL=false` | Any OpenAI-compatible API  | Fast, high quality         |
+| `USE_LOCAL=true`  | Ollama local (`LOCAL_LLM_MODEL`) | Offline, private, air gap |
 
-> Embeddings always use Nebius for consistency — switching embedding models requires re-ingestion.
+> Embeddings always use the same cloud provider for consistency — switching embedding models requires re-ingestion.
+
+## Provider Compatibility
+
+The system uses the [OpenAI-compatible API pattern](https://platform.openai.com/docs/api-reference) — swap `LLM_BASE_URL` and `LLM_API_KEY` to use any provider without changing code:
+
+| Provider | `LLM_BASE_URL`                        | Free Tier       | Notes                        |
+| -------- | ------------------------------------- | --------------- | ---------------------------- |
+| Nebius   | `https://api.studio.nebius.ai/v1`     | Free credits    | Default; wide model selection |
+| Groq     | `https://api.groq.com/openai/v1`      | Yes (rate-limited) | ~500 tokens/sec on custom LPU hardware |
+| OpenAI   | `https://api.openai.com/v1`           | No              | GPT-4o, o1, etc.             |
+| Ollama   | `http://localhost:11434/v1`           | Yes (local)     | Set `USE_LOCAL=true`         |
+
+To switch to Groq (free, fast):
+```env
+LLM_API_KEY=your_groq_api_key
+LLM_BASE_URL=https://api.groq.com/openai/v1
+CLOUD_LLM_MODEL=llama-3.3-70b-versatile
+```
 
 To switch to local mode, update `.env`:
 
